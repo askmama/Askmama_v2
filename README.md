@@ -1,4 +1,4 @@
-# AskMama MVP - Telegram Audio Transcription Bot
+# AskMama v2 - Telegram Audio Transcription Bot
 
 A Telegram bot that receives audio messages, transcribes them using OpenAI Whisper, and logs the transcriptions to Google Sheets.
 
