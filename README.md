@@ -43,10 +43,29 @@ A Telegram bot that receives audio messages, transcribes them using OpenAI Whisp
    - Grant it "Editor" role
    - Create a JSON key and download it
 5. Rename the downloaded file to `credentials.json` and place it in the project directory
+   - Use `credentials.example.json` as a reference for the expected structure
 6. Create a new Google Sheet for logging
 7. Share the Google Sheet with the service account email (found in credentials.json)
 
-### 5. Install Dependencies
+### 5. Upload Your Excel Sheet to Google Drive
+
+1. Download your current Excel inventory sheet (`.xlsx` file) to your local machine
+2. Go to [Google Drive](https://drive.google.com/) and sign in with the **same Google account** used for your service account
+3. Upload the Excel file:
+   - Click **+ New** > **File upload**
+   - Select your `.xlsx` file and upload it
+4. After uploading, open the file in Google Drive and copy the **File ID** from the URL:
+   ```
+   https://drive.google.com/file/d/<FILE_ID>/view
+   ```
+5. Share the file with your service account email (found in `credentials.json` under `client_email`) with **Editor** access
+6. Add the File ID to your `.env` file:
+   ```
+   GOOGLE_DRIVE_FILE_ID=your_file_id_here
+   ```
+7. The Google Drive API was already enabled in Step 4 — no additional setup needed
+
+### 6. Install Dependencies
 
 ```bash
 # Create virtual environment (recommended)
@@ -57,7 +76,7 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 6. Configure Environment Variables
+### 7. Configure Environment Variables
 
 ```bash
 # Copy the example .env file
@@ -68,9 +87,10 @@ cp .env.example .env
 # - TELEGRAM_BOT_TOKEN
 # - GEMINI_API_KEY
 # - GOOGLE_SHEET_NAME
+# - GOOGLE_DRIVE_FILE_ID
 ```
 
-### 7. Load Environment Variables
+### 8. Load Environment Variables
 
 ```bash
 # Install python-dotenv if not already installed
@@ -82,7 +102,7 @@ export GEMINI_API_KEY=your_key_here
 export GOOGLE_SHEET_NAME=your_sheet_name_here
 ```
 
-### 8. Run the Bot
+### 9. Run the Bot
 
 ```bash
 python bot.py
@@ -119,7 +139,8 @@ AskMama_MVP/
 ├── requirements.txt        # Python dependencies
 ├── .env.example           # Environment variables template
 ├── .env                   # Your actual credentials (not in git)
-├── credentials.json       # Google service account key (not in git)
+├── credentials.example.json  # Google service account key template
+├── credentials.json       # Your actual service account key (not in git)
 └── README.md             # This file
 ```
 
@@ -160,7 +181,3 @@ Edit `audio_transcriber.py` and change the `language` parameter in the transcrip
 ### Add more columns to Google Sheets
 
 Modify the `log_to_sheet()` function in `sheets_logger.py` to add additional data fields.
-
-## License
-
-MIT License
