@@ -58,10 +58,12 @@ def parse_command(transcript_text):
     client = genai.Client()
     prompt = f"""You are an inventory tracking assistant for a small business.
 
-Extract exactly three things from voice commands:
+Extract exactly these fields from voice commands:
 - item: name of the item (string)
 - quantity: how many taken or added (integer)
 - action: either exactly "taken" or exactly "added"
+- category: one of "Salon", "Cleaning", "Medical", "Office", or "" if unclear
+- unit: measurement unit such as "bottle", "box", "kg", "litre", "pack", "tube", "roll", "piece", "unit", or "" if unclear
 
 Rules:
 - Respond with JSON and nothing else
@@ -73,7 +75,7 @@ Rules:
 - "added", "delivery", "restocked", "put back", "got" = added
 
 Your entire response must be exactly this format with no other text:
-{{"item": "name here", "quantity": 1, "action": "taken"}}
+{{"item": "name here", "quantity": 1, "action": "taken", "category": "", "unit": ""}}
 
 Voice command: {transcript_text}"""
 
@@ -86,6 +88,8 @@ Voice command: {transcript_text}"""
         parsed.setdefault("item", "unknown")
         parsed.setdefault("quantity", 1)
         parsed.setdefault("action", "taken")
+        parsed.setdefault("category", "")
+        parsed.setdefault("unit", "")
         try:
             parsed["quantity"] = int(parsed["quantity"])
         except (ValueError, TypeError):
@@ -163,6 +167,8 @@ async def _process_command(update: Update, context: ContextTypes.DEFAULT_TYPE, t
             'quantity': quantity,
             'action': action,
             'raw': text,
+            'category': parsed.get('category', ''),
+            'unit': parsed.get('unit', ''),
         }
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton(
@@ -237,6 +243,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 quantity=pending['quantity'],
                 action=pending['action'],
                 raw_command=pending['raw'],
+                category=pending.get('category', ''),
+                unit=pending.get('unit', ''),
             )
             await query.edit_message_text(
                 f"➕ New item added!\n\n{format_summary(result)}",
