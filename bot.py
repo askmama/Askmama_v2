@@ -31,7 +31,7 @@ CB_CANCEL  = "cancel"
 # ── GEMINI COMMAND PARSER ─────────────────────────────────
 
 def _safe_parse(raw):
-    """Strip markdown fences and parse JSON from Gemini output."""
+    """Strip markdown fences and parse JSON (object or array) from Gemini output."""
     if not raw:
         return None
     text = raw.strip()
@@ -39,26 +39,49 @@ def _safe_parse(raw):
     text = re.sub(r'^```\s*', '', text)
     text = re.sub(r'\s*```$', '', text)
     text = text.strip()
-    match = re.search(r'\{.*?\}', text, re.DOTALL)
+    # Prefer an array; fall back to a bare object
+    match = re.search(r'\[.*\]', text, re.DOTALL)
+    if not match:
+        match = re.search(r'\{.*?\}', text, re.DOTALL)
     if match:
         text = match.group()
     text = text.replace("'", '"')
     text = re.sub(r',\s*}', '}', text)
+    text = re.sub(r',\s*\]', ']', text)
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         return None
 
 
+def _normalise_item(item):
+    """Normalise and validate a single parsed item dict."""
+    item.setdefault("item", "unknown")
+    item.setdefault("quantity", 1)
+    item.setdefault("action", "taken")
+    item.setdefault("category", "")
+    item.setdefault("unit", "")
+    try:
+        item["quantity"] = int(item["quantity"])
+    except (ValueError, TypeError):
+        item["quantity"] = 1
+    item["action"] = str(item["action"]).lower()
+    if item["action"] not in ("taken", "added"):
+        item["action"] = "taken"
+    return item
+
+
 def parse_command(transcript_text):
     """
-    Use Gemini to extract {item, quantity, action} from a transcript.
-    Returns parsed dict or None.
+    Use Gemini to extract inventory actions from a transcript.
+    Always returns a list of item dicts (may be empty).
     """
     client = genai.Client()
     prompt = f"""You are an inventory tracking assistant for a small business.
 
-Extract exactly these fields from voice commands:
+Extract ALL inventory actions from the voice command. There may be multiple items.
+
+For each item extract:
 - item: name of the item (string)
 - quantity: how many taken or added (integer)
 - action: either exactly "taken" or exactly "added"
@@ -66,16 +89,16 @@ Extract exactly these fields from voice commands:
 - unit: measurement unit such as "bottle", "box", "kg", "litre", "pack", "tube", "roll", "piece", "unit", or "" if unclear
 
 Rules:
-- Respond with JSON and nothing else
+- Respond with a JSON array and nothing else
 - No markdown, no backticks, no explanation whatsoever
 - If quantity unclear use 1
 - If item unclear use "unknown"
 - If action unclear use "taken"
 - "used", "took", "grabbed", "removed", "ran out" = taken
-- "added", "delivery", "restocked", "put back", "got" = added
+- "added", "delivery", "restocked", "put back", "got", "restock" = added
 
 Your entire response must be exactly this format with no other text:
-{{"item": "name here", "quantity": 1, "action": "taken", "category": "", "unit": ""}}
+[{{"item": "name here", "quantity": 1, "action": "taken", "category": "", "unit": ""}}]
 
 Voice command: {transcript_text}"""
 
@@ -84,20 +107,13 @@ Voice command: {transcript_text}"""
         contents=prompt
     )
     parsed = _safe_parse(response.text)
-    if parsed:
-        parsed.setdefault("item", "unknown")
-        parsed.setdefault("quantity", 1)
-        parsed.setdefault("action", "taken")
-        parsed.setdefault("category", "")
-        parsed.setdefault("unit", "")
-        try:
-            parsed["quantity"] = int(parsed["quantity"])
-        except (ValueError, TypeError):
-            parsed["quantity"] = 1
-        parsed["action"] = str(parsed["action"]).lower()
-        if parsed["action"] not in ("taken", "added"):
-            parsed["action"] = "taken"
-    return parsed
+    if parsed is None:
+        return []
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+    if not isinstance(parsed, list):
+        return []
+    return [_normalise_item(p) for p in parsed if isinstance(p, dict)]
 
 
 # ── REPLY FORMATTER ───────────────────────────────────────
@@ -146,42 +162,62 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _process_command(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
     """Parse an inventory command string and update the sheet."""
-    parsed = parse_command(text)
-    if not parsed or parsed.get('item') == 'unknown':
+    parsed_list = parse_command(text)
+    known = [p for p in parsed_list if p.get('item') != 'unknown']
+
+    if not known:
         await update.message.reply_text(
             "❓ Could not identify an item or action. Please try again."
         )
         return
 
-    item_name = parsed['item']
-    quantity  = parsed['quantity']
-    action    = parsed['action']
+    successes = []
+    stock_errors = []
+    not_found = []
 
-    result = update_inventory(item_name, quantity, action, text)
+    for parsed in known:
+        item_name = parsed['item']
+        quantity  = parsed['quantity']
+        action    = parsed['action']
+        try:
+            result = update_inventory(item_name, quantity, action, text)
+            if result:
+                successes.append(result)
+            else:
+                not_found.append(parsed)
+        except ValueError as e:
+            stock_errors.append(str(e))
 
-    if result:
-        await update.message.reply_text(format_summary(result), parse_mode='Markdown')
-    else:
+    if successes:
+        await update.message.reply_text(
+            "\n\n".join(format_summary(r) for r in successes),
+            parse_mode='Markdown'
+        )
+
+    for err in stock_errors:
+        await update.message.reply_text(f"⚠️ {err}")
+
+    if len(not_found) == 1:
+        p = not_found[0]
         context.user_data['pending'] = {
-            'item': item_name,
-            'quantity': quantity,
-            'action': action,
-            'raw': text,
-            'category': parsed.get('category', ''),
-            'unit': parsed.get('unit', ''),
+            'item': p['item'], 'quantity': p['quantity'], 'action': p['action'],
+            'raw': text, 'category': p.get('category', ''), 'unit': p.get('unit', ''),
         }
         keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton(
-                f"✅ Add '{item_name}' as new item",
-                callback_data=CB_ADD_NEW
-            ),
+            InlineKeyboardButton(f"✅ Add '{p['item']}' as new item", callback_data=CB_ADD_NEW),
             InlineKeyboardButton("❌ Cancel", callback_data=CB_CANCEL),
         ]])
         await update.message.reply_text(
-            f"⚠️ *'{item_name}'* not found in inventory.\n"
-            f"Action: {action} × {quantity}\n\n"
+            f"⚠️ *'{p['item']}'* not found in inventory.\n"
+            f"Action: {p['action']} × {p['quantity']}\n\n"
             "What would you like to do?",
             reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
+    elif not_found:
+        names = ', '.join(f"*{p['item']}*" for p in not_found)
+        await update.message.reply_text(
+            f"⚠️ Not found in inventory: {names}",
             parse_mode='Markdown'
         )
 

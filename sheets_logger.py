@@ -34,6 +34,171 @@ CATEGORY_PREFIX = {
     'office': 'O',
 }
 
+# Transaction Log formatting — must match the layout set by format_sheets.py
+_LOG_HEADER_ROW = 2   # 1-based row where Transaction Log headers live
+_LOG_N_COLS = 7
+_LOG_ACTION_COL = 3   # 0-indexed column D
+_LOG_CENTRE_COLS = [1, 4, 6]  # Item ID (B), Qty (E), New Stock Level (G)
+
+
+def _rgb(r, g, b):
+    return {"red": r / 255, "green": g / 255, "blue": b / 255}
+
+
+_LOG_ROW_COLORS = {
+    'ADDED': _rgb(198, 239, 206),
+    'TAKEN': _rgb(255, 199, 206),
+    'alt':   _rgb(245, 247, 250),
+    'white': _rgb(255, 255, 255),
+}
+
+_OUTER_BORDER = {"style": "SOLID_MEDIUM", "width": 2, "color": _rgb(30, 100, 82)}
+_INNER_BORDER = {"style": "SOLID", "width": 1, "color": _rgb(189, 195, 199)}
+
+# Keep aliases so existing references in _format_log_row continue to work
+_LOG_OUTER_BORDER = _OUTER_BORDER
+_LOG_INNER_BORDER = _INNER_BORDER
+
+# Inventory sheet formatting constants
+_INV_N_COLS = 10         # A–J (Item ID … Notes)
+_INV_STATUS_COL = 7      # 0-indexed column H
+_INV_CENTRE_COLS = [0, 3, 4, 5, 6, 8]  # ID(A) Qty(D) Min(E) Max(F) Unit(G) Date(I)
+
+_INV_STATUS_COLORS = {
+    'OK':        _rgb(198, 239, 206),
+    'LOW STOCK': _rgb(255, 235, 156),
+    'MISSING':   _rgb(255, 199, 206),
+}
+_INV_ALT_BG  = _rgb(245, 247, 250)
+_INV_WHITE   = _rgb(255, 255, 255)
+
+
+def _format_inv_row(ws, row_1based, status):
+    """Apply background, status colour, alignment, and borders to a new inventory row."""
+    if not row_1based:
+        return
+    sid = ws.id
+    r = row_1based - 1                      # 0-indexed
+    data_start = INV_START_ROW - 1          # 0-indexed (= 3)
+    is_alt = (r - data_start) % 2 == 1
+    row_bg = _INV_ALT_BG if is_alt else _INV_WHITE
+    status_bg = _INV_STATUS_COLORS.get((status or '').upper(), row_bg)
+    is_alert = (status or '').upper() in ('LOW STOCK', 'MISSING')
+
+    def rng(r1, r2, c1, c2):
+        return {"sheetId": sid, "startRowIndex": r1, "endRowIndex": r2,
+                "startColumnIndex": c1, "endColumnIndex": c2}
+
+    requests = [
+        # Row background
+        {"repeatCell": {
+            "range": rng(r, r + 1, 0, _INV_N_COLS),
+            "cell": {"userEnteredFormat": {"backgroundColor": row_bg}},
+            "fields": "userEnteredFormat.backgroundColor",
+        }},
+        # Status cell: colour + conditional bold + centred
+        {"repeatCell": {
+            "range": rng(r, r + 1, _INV_STATUS_COL, _INV_STATUS_COL + 1),
+            "cell": {"userEnteredFormat": {
+                "backgroundColor": status_bg,
+                "textFormat": {"bold": is_alert},
+                "horizontalAlignment": "CENTER",
+            }},
+            "fields": ("userEnteredFormat.backgroundColor,"
+                       "userEnteredFormat.textFormat.bold,"
+                       "userEnteredFormat.horizontalAlignment"),
+        }},
+        # Centre-align numeric / date columns
+        *[{"repeatCell": {
+            "range": rng(r, r + 1, c, c + 1),
+            "cell": {"userEnteredFormat": {"horizontalAlignment": "CENTER"}},
+            "fields": "userEnteredFormat.horizontalAlignment",
+        }} for c in _INV_CENTRE_COLS],
+        # Previous last data row: soften bottom border to thin
+        *([{"updateBorders": {
+            "range": rng(r - 1, r, 0, _INV_N_COLS),
+            "bottom": _INNER_BORDER,
+        }}] if r > data_start else []),
+        # New row: thick outer borders, thin inner column dividers
+        {"updateBorders": {
+            "range": rng(r, r + 1, 0, _INV_N_COLS),
+            "top": _INNER_BORDER,
+            "bottom": _OUTER_BORDER,
+            "left": _OUTER_BORDER,
+            "right": _OUTER_BORDER,
+            "innerVertical": _INNER_BORDER,
+        }},
+    ]
+    ws.spreadsheet.batch_update({"requests": requests})
+
+
+def _parse_appended_row(resp):
+    """Return the 1-based row number from an append_row() API response."""
+    range_str = (resp or {}).get('updates', {}).get('updatedRange', '')
+    if range_str:
+        last_cell = range_str.split(':')[-1]          # e.g. "G45"
+        digits = ''.join(c for c in last_cell if c.isdigit())
+        if digits:
+            return int(digits)
+    return None
+
+
+def _format_log_row(ws, row_1based, action):
+    """Apply background, action colour, alignment, and borders to a new log row."""
+    if not row_1based:
+        return
+    sid = ws.id
+    r = row_1based - 1  # 0-indexed
+    is_alt = (r - _LOG_HEADER_ROW) % 2 == 1
+    row_bg = _LOG_ROW_COLORS['alt'] if is_alt else _LOG_ROW_COLORS['white']
+    action_bg = _LOG_ROW_COLORS.get(action.upper(), row_bg)
+
+    def rng(r1, r2, c1, c2):
+        return {"sheetId": sid, "startRowIndex": r1, "endRowIndex": r2,
+                "startColumnIndex": c1, "endColumnIndex": c2}
+
+    requests = [
+        # Row background
+        {"repeatCell": {
+            "range": rng(r, r + 1, 0, _LOG_N_COLS),
+            "cell": {"userEnteredFormat": {"backgroundColor": row_bg}},
+            "fields": "userEnteredFormat.backgroundColor",
+        }},
+        # Action cell: colour + bold + centred
+        {"repeatCell": {
+            "range": rng(r, r + 1, _LOG_ACTION_COL, _LOG_ACTION_COL + 1),
+            "cell": {"userEnteredFormat": {
+                "backgroundColor": action_bg,
+                "textFormat": {"bold": True},
+                "horizontalAlignment": "CENTER",
+            }},
+            "fields": ("userEnteredFormat.backgroundColor,"
+                       "userEnteredFormat.textFormat.bold,"
+                       "userEnteredFormat.horizontalAlignment"),
+        }},
+        # Centre-align other columns
+        *[{"repeatCell": {
+            "range": rng(r, r + 1, c, c + 1),
+            "cell": {"userEnteredFormat": {"horizontalAlignment": "CENTER"}},
+            "fields": "userEnteredFormat.horizontalAlignment",
+        }} for c in _LOG_CENTRE_COLS],
+        # Previous last row: soften its bottom border to thin
+        *([{"updateBorders": {
+            "range": rng(r - 1, r, 0, _LOG_N_COLS),
+            "bottom": _LOG_INNER_BORDER,
+        }}] if r > _LOG_HEADER_ROW else []),
+        # New row: full border — thick on left/right/bottom, thin on top and inner columns
+        {"updateBorders": {
+            "range": rng(r, r + 1, 0, _LOG_N_COLS),
+            "top": _LOG_INNER_BORDER,
+            "bottom": _LOG_OUTER_BORDER,
+            "left": _LOG_OUTER_BORDER,
+            "right": _LOG_OUTER_BORDER,
+            "innerVertical": _LOG_INNER_BORDER,
+        }},
+    ]
+    ws.spreadsheet.batch_update({"requests": requests})
+
 
 def _get_client():
     creds_file = os.getenv('GOOGLE_CREDENTIALS_FILE', 'credentials.json')
@@ -131,18 +296,42 @@ def update_inventory(item_name, quantity, action, raw_command):
         return None
 
     cur_qty = item['qty']
-    new_qty = max(0, cur_qty - quantity) if action == "taken" else cur_qty + quantity
+    if action == "taken" and quantity > cur_qty:
+        raise ValueError(
+            f"Cannot deduct {quantity} — only {cur_qty} {item['name']} in stock."
+        )
+    new_qty = cur_qty - quantity if action == "taken" else cur_qty + quantity
     new_status = _compute_status(new_qty, item['min_qty'])
     now = datetime.now()
 
-    # Update Inventory row
-    ws_inv.update_cell(found_row, COL_QTY, new_qty)
-    ws_inv.update_cell(found_row, COL_STATUS, new_status)
-    ws_inv.update_cell(found_row, COL_LAST_UPDATED, now.strftime("%d %b %Y"))
-    ws_inv.format(f'I{found_row}', {'horizontalAlignment': 'CENTER'})
+    # Update Inventory row — RAW keeps numbers as integers and date as text,
+    # preventing gspread 6's user_entered from converting the date string to a serial number.
+    now_str = now.strftime("%d %b %Y")
+    ws_inv.batch_update(
+        [
+            {'range': f'D{found_row}', 'values': [[int(new_qty)]]},
+            {'range': f'H{found_row}', 'values': [[new_status]]},
+            {'range': f'I{found_row}', 'values': [[now_str]]},
+        ],
+        value_input_option='RAW',
+    )
+    # Apply consistent cell format to match original data: qty as plain integer,
+    # date center-aligned as text.
+    ws_inv.batch_format(
+        [
+            {
+                'range': f'D{found_row}',
+                'format': {'numberFormat': {'type': 'NUMBER', 'pattern': '0'}},
+            },
+            {
+                'range': f'I{found_row}',
+                'format': {'horizontalAlignment': 'CENTER'},
+            },
+        ]
+    )
 
     # Append to Transaction Log
-    ws_log.append_row([
+    resp = ws_log.append_row([
         now.strftime("%d %b %Y %H:%M"),
         item['id'],
         item['name'],
@@ -151,6 +340,7 @@ def update_inventory(item_name, quantity, action, raw_command):
         raw_command,
         new_qty,
     ])
+    _format_log_row(ws_log, _parse_appended_row(resp), action)
 
     return {
         'name':     item['name'],
@@ -207,12 +397,12 @@ def append_new_item(item_name, quantity, action, raw_command,
 
     if totals_row:
         ws_inv.insert_row(new_row_data, index=totals_row)
-        ws_inv.format(f'I{totals_row}', {'horizontalAlignment': 'CENTER'})
+        _format_inv_row(ws_inv, totals_row, new_status)
     else:
         ws_inv.append_row(new_row_data)
         last_row = len(ws_inv.get_all_values())
-        ws_inv.format(f'I{last_row}', {'horizontalAlignment': 'CENTER'})
-    ws_log.append_row([
+        _format_inv_row(ws_inv, last_row, new_status)
+    resp = ws_log.append_row([
         now.strftime("%d %b %Y %H:%M"),
         '',
         item_name,
@@ -221,6 +411,7 @@ def append_new_item(item_name, quantity, action, raw_command,
         raw_command,
         new_qty,
     ])
+    _format_log_row(ws_log, _parse_appended_row(resp), action)
 
     return {
         'name':     item_name,
